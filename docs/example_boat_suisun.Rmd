@@ -1,0 +1,204 @@
+---
+title: "Example Project: Suisun Marsh"
+author: "Ryan Peek"
+date: "*Updated: `r format(Sys.Date())`*"
+output: 
+  html_document:
+    code_folding: hide
+    highlight: pygments
+    theme: sandstone
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+ > *"Just collated Kyle Phillip's and my field data from Oct-recent from a 500 acre duck pond in the Suisun Marsh! Sampling was a tad discrete and inconsistent in the earlier sampling events as we were figuring things out. But we're ramping up now and understanding spatial heterogeneity is an important component to our work."*
+
+## Load Packages
+
+Here we `source` a separate script which only loads our libraries. This is a way to have separate scripts written for specific tasks, particularly if you do these tasks over and over.
+
+```{r libraries, warning=FALSE}
+library(here)
+library(viridis)
+source(here("scripts/load_libraries.R"))
+suppressPackageStartupMessages(library(tidyverse))
+```
+
+### Load Data
+
+Let's load the data and format things so we can use them.
+
+```{r readInDat, warning=F, message=F}
+
+dat <- read_csv(file = here("data/2017_10_08_Boat_Data.csv"))
+glimpse(dat)
+
+```
+
+### Clean Data
+
+Ok, so we have some data...but it needs some **tidying**. Good news! We know how to do this now.
+
+ - Let's first convert our `Time` column into a `datetime` format (`POSIXct`). 
+ - Then we'll summarize and check for missingess in our data using the [`naniar`](http://naniar.njtierney.com/) package.
+ 
+```{r format, warning=F, message=F}
+
+library(lubridate)
+dat2 <- dat %>% 
+  mutate(datetime = mdy_hms(Time)) %>% 
+  select(-Time)
+  
+```
+ 
+**Check for missingness:**
+
+ - we can do with summary or is.na, or we can look at this visually
+ 
+```{r naniar, eval=T, echo=T}
+
+summary(dat2)
+
+library(naniar)
+gg_miss_var(dat2)
+
+```
+
+Looks like we have 54 missing Water Temperature records, plus a bunch of -7999 values and values great than 36 C!  The missing values isn't too bad, (out of a dataset that is `r nrow(dat2)` rows long), but we should filter the wonky values out.
+
+```{r filterTemp}
+
+dat2 <- dat2 %>% 
+  filter(WaterTemp_C >=20, WaterTemp_C < 45)
+
+ggplot() + geom_point(data=dat2, aes(x=datetime, y=WaterTemp_C, color=WaterTemp_C)) + 
+  scale_color_viridis()
+
+# this is a better plot
+ggplot() + geom_point(data=dat2, aes(x=datetime, y=CO2_ppm, color=WaterTemp_C)) + 
+  scale_color_viridis()
+
+```
+
+Better, we're now down to `r nrow(dat2)` rows. But let's filter to times after 11:00 and before 15:07, since it looks like there's some scatter, not sure why, but maybe folks who collected the data have a good explanation.
+
+```{r filterTime}
+
+dat3 <- dat2 %>% 
+  filter(datetime > ymd_hms("2017-10-08 11:00:00"), datetime < ymd_hms("2017-10-08 15:07:00"))
+
+ggplot() + geom_point(data=dat3, aes(x=datetime, y=WaterTemp_C, color=WaterTemp_C)) + 
+  scale_color_viridis()
+
+# this is a better plot
+ggplot() + geom_point(data=dat3, aes(x=datetime, y=CO2_ppm, color=WaterTemp_C)) + 
+  scale_color_viridis()
+
+```
+
+
+## Make it Spatial
+
+Ok, now we can make this a spatial data set so we can make a map. This is using the `sf` package.
+
+```{r makeSpatial}
+dat_sf <- st_as_sf(dat3,
+                       coords = c("Longitude", "Latitude"), # can use numbers here too
+                       remove = F, # don't remove these lat/lon cols from df
+                       crs = 4326) # add projection
+```
+
+
+### Make some Maps
+
+Now we can start viewing this data...did it project correctly? Do the points look correct? Let's take a look using a few simple interactive map packages. Namely, `mapview`.
+
+```{r mapview, eval=F}
+
+# not evaluating this because it will be very large and take a while to render
+mapview(dat_sf)
+
+```
+
+This is a lot of points, so what about aggregating things a bit and simplifying? Good news, we can use `summarize` and `lubridate`
+
+```{r aggregateDat}
+
+# two ways to do this: with round_date and with mutate and groupby:
+
+dat10sec <-dat_sf %>% 
+  mutate(datetime=round_date(datetime, "10 sec")) %>% 
+  group_by(datetime) %>% #distinct(datetime, .keep_all = T) %>% dim() # use this to check number of records
+  summarize_at(vars(CO2_ppm:WaterTemp_C), mean, na.rm=TRUE)
+
+
+dat01min <- dat_sf %>% 
+  mutate(hr = hour(datetime),
+         yrday = yday(datetime), 
+         mins = minute(datetime)) %>% # now summarize
+  group_by(yrday, hr, mins) %>% 
+  summarize_at(vars(CO2_ppm:WaterTemp_C), mean, na.rm=TRUE)
+
+mapview(dat10sec) + mapview(dat01min)
+
+```
+
+
+## PLOTS
+
+
+### Map Plots
+
+Plot Water Temp vs. CO2 as a function of X/Y.
+
+```{r blankmapplot}
+
+#ggplot() + geom_sf(data=dat_sf, aes(size=CO2_ppm, color=WaterTemp_C)) + 
+#  scale_color_viridis() + coord_sf() + theme_minimal()
+
+ggplot() + geom_sf(data=dat10sec, aes(size=CO2_ppm, color=WaterTemp_C)) + 
+  scale_color_viridis() + coord_sf() + theme_minimal()
+
+ggplot() + geom_sf(data=dat01min, aes(size=CO2_ppm, color=WaterTemp_C)) + 
+  scale_color_viridis() + coord_sf() + theme_minimal()
+
+ggplot() + geom_sf(data=dat10sec, aes(color=CO2_ppm, size=WaterTemp_C)) + 
+  scale_color_viridis() + coord_sf() + theme_minimal()
+
+```
+
+
+### Regression Plots
+
+We can do some regressions to see if we pick any patterns up, using `geom_smooth`.
+
+```{r regressionPlot}
+
+ggplot() + 
+  geom_point(data=dat10sec, aes(x=datetime, y=CO2_ppm, color=WaterTemp_C)) + 
+  scale_color_viridis() + theme_classic()
+
+ggplot() + 
+  geom_point(data=dat10sec, aes(x=datetime, y=WaterTemp_C, color=CO2_ppm)) + 
+  scale_color_viridis() + theme_classic()
+
+```
+
+This is pretty crazy, and seems like there are some outliers here...let's restrict the data to C0^2^ levels above 550 and below 800.
+
+```{r restrictedRegression}
+
+# lets restrict to co2 above 550 and below 800
+dat_restrict <- filter(dat10sec, CO2_ppm < 800 , CO2_ppm > 550)
+ggplot() + 
+  geom_point(data=dat_restrict, aes(x=CO2_ppm, y=WaterTemp_C, color=WaterTemp_C)) + 
+  geom_smooth(data=dat_restrict, aes(x=CO2_ppm, y=WaterTemp_C, color=WaterTemp_C), alpha=0.3) + 
+  scale_color_viridis() + theme_classic()
+
+
+```
+
+No idea if this is something useful, but it's certainly looks interesting. :)
+
