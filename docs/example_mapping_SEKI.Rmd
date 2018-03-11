@@ -1,0 +1,245 @@
+---
+title: "Example Project: SEKI"
+author: "Ryan Peek"
+date: "*Updated: `r format(Sys.Date())`*"
+output: 
+  html_document:
+    code_folding: hide
+    highlight: pygments
+    theme: yeti
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#knitr::opts_chunk$set(normalizePath("../"))
+library(here)
+```
+
+ > *"So what I want to do is:  
+   1. correctly project my coordinates onto a map of my study site and produce a map that displays them  
+   2. measure the distance of each playback point to the location of the audio recorder (which is also point 1 in both of the locations)  
+   3. graph the relationship between amplitude of the recorded Mountain Chickadee (MOCH) song and distance from recorder"*
+
+## Load Packages
+
+Here we `source` a separate script which only loads our libraries. This is a way to have separate scripts written for specific tasks, particularly if you do these tasks over and over.
+
+```{r libraries}
+source(here("scripts/load_spatial_libraries.R"))
+suppressPackageStartupMessages(library(tidyverse))
+library(viridis)
+```
+
+### Load Data
+
+These data files look weird. Here's the `head` of one:
+
+```{bash, echo=T, eval=T}
+
+head -n1 ../data/CENTER1_20140816_203919.Table.1.selections.txt
+```
+
+It seems they don't have any line endings...that is they basically just continue to wrap across one long line. Let's try to read them in with `read_delim` or `read_tsv`.
+
+```{r readInDat, warning=F, message=F}
+
+dat1 <- read_delim(file = here("data/CENTER1_20140816_203919.Table.1.selections.txt"), delim = "\t") # that worked, so we can use read_tsv
+
+dat2a <- read_tsv(file= here("data/CENTER2_20140817_080105.Table.1.selections.txt"))
+dat2b <- read_tsv(file= here("data/CENTER2_20140817_090105.Table.1.selections.txt"))
+
+```
+
+### Clean Data
+
+Ok, so we have some data...but it needs some **tidying**. Good news! We know how to do this now.
+
+ - Let's first join the `dat2a` with `dat2b` as those are from the same day...notice they have different numbers of columns though. :(
+ 
+```{r join2a2b, warning=F, message=F}
+
+dat2 <- full_join(dat2a, dat2b)
+
+```
+ 
+Ok, looks good. There's some missing data between the two, but we can follow up on that later. Let's next look at adding a column for lake 1 and lake 2, and then joining these datasets into one, even though there a few columns that are different. It will make working with the data easier since they will all be in one single file. 
+
+```{r join1w2, warning=F, message=F}
+
+# add lake names to each file:
+dat1 <- dat1 %>% 
+  rename(Dist_to_Mic = Dist_to_SM)
+dat2 <- dat2 %>% 
+  select(-`Freq 95% (Hz)`, -`Freq 5% (Hz)`)
+
+names(dat1)
+names(dat2)
+
+fulldat <- full_join(dat1, dat2) # try to put the df w/ more cols as the "left" side
+
+# make a searchable table with the DT package
+DT::datatable(fulldat)
+
+
+```
+
+Great, all data in one file!  There's some missingness, but that's ok for now. 
+
+## Make it Spatial
+
+Ok, now we can work with our UTM data and make this a spatial data set so we can make a map. This is using the `sf` package.
+
+```{r makeSpatial}
+fulldat_sf <- st_as_sf(fulldat,
+                       coords = c("UTM_X", "UTM_Y"), # can use numbers here too
+                       remove = F, # don't remove these lat/lon cols from df
+                       crs = 26711) # add projection, def Z11, NAD83
+# These CRS didn't work: 4269, 3310, 3372, 3488, 3311, 3740, 3741, 6414, 42303, 5071, 26944
+# Didn't work: 3495, 2769, 2228, 3309, 6421, 26744, 6422, 42308, 3741, 26911, 102644
+# These work (sort of): 26711
+
+# transform data here:
+#fulldat_sf <- fulldat_sf %>% st_transform(crs = 4326)
+
+```
+
+
+### Make some Maps
+
+Now we can start viewing this data...did it project correctly? Do the points look correct? Let's take a look using a few simple interactive map packages. Namely, `mapview`. We can layer multiple objects by adding them together. We'll add a few counties here for reference.
+
+```{r mapview}
+
+library(USAboundaries)
+counties_spec <- us_counties(resolution = "low", states="CA") %>%
+  filter(name %in% c("Tulare", "Inyo", "Fresno"))
+
+mapview(counties_spec) + mapview(fulldat_sf, color="orange") 
+
+```
+
+Looks like one point is wonky...row 1, UTM_X is `278545` and should probably be `378545`. Likely an error from data entry? Let's change it.
+
+```{r fixDatapoint}
+
+fulldat <- fulldat %>% 
+  mutate(UTM_X = replace(UTM_X, UTM_X==278545, 378545))
+
+# double check:
+fulldat[fulldat$UTM_X==278545,]
+
+# re=spatialize
+fulldat_sf <- st_as_sf(fulldat,
+                       coords = c("UTM_X", "UTM_Y"), # can use numbers here too
+                       remove = F, # don't remove these lat/lon cols from df
+                       crs = 26711 ) # add NAD83/UTM Zone 11 26711
+
+mapview(counties_spec) + mapview(fulldat_sf)
+```
+
+### Process Spatial Data
+
+Measure from the recorder to all other points, using the `st_distance` function. This makes a matrix of every point vs. every other point. Typically lat/longs are not an ideal projection for this, so we'll likely get a warning, but the relative measurements should be fine. The first value in each of the lakes is the recorder (I believe). So we will use the first column.
+
+```{r}
+l1 <- filter(fulldat_sf, LAKE==1) # all other pts
+
+l1_dists <- st_distance(l1)
+l1_dists
+
+l2 <- filter(fulldat_sf, LAKE==2) # all other pts
+
+l2_dists <- st_distance(l2)
+l2_dists
+
+# to get the distance from point 1 to all other points, grab first col
+dist_to_recorder <- bind_rows(tibble(rec_dists = l1_dists[,1]), tibble(rec_dists=l2_dists[,1]))
+```
+
+## PLOTS
+
+Plot amplitude vs. distance to recorder, using the `geom_sf` function of `ggplot`. This will require installing the development version of `ggplot2` (I believe). 
+
+```{r, eval=F, echo=T}
+#install.packages("devtools")
+devtools::install_github("tidyverse/ggplot2")
+```
+
+
+### Plot Data Spatially
+
+```{r blankmapplot}
+# bind col with original dataset:
+fulldat_sf <- bind_cols(fulldat_sf, dist_to_recorder)
+
+library(viridis)
+ggplot() + 
+  geom_sf(data=fulldat_sf, aes(color=rec_dists, size=`High Freq (Hz)`)) + 
+  scale_color_viridis() + coord_sf() + theme_classic()
+
+ggplot() + 
+  geom_sf(data=fulldat_sf, aes(color=rec_dists, size=`Max Power (dB)`)) + 
+  scale_color_viridis() + coord_sf() + theme_classic()
+
+```
+
+### Add GGMAP Background
+
+Now we add some background imagery using the `ggmap` package.
+
+```{r ggmap}
+
+# add a ggmap background
+library(ggmap) # need this package
+
+# make sure projection is mercator so will match google
+fulldat_lat_sf <- fulldat_sf %>% st_transform(crs = 4326)
+
+# set the background map: black and white terrain
+map1 <- get_map(location=c(-118.357, 36.732), crop = F,
+                #color="bw",
+                maptype="terrain",
+                source="google",
+                zoom=15)
+# plot
+ggmap(map1) +
+  geom_sf(data=fulldat_lat_sf, aes(color=rec_dists, size=`Max Power (dB)`), inherit.aes = FALSE) + 
+  scale_color_viridis() + coord_sf() + theme_classic()
+
+# or an imagery option:
+map2 <- get_map(location=c(-118.357, 36.732), crop = F,
+                #color="bw",
+                maptype="satellite",
+                source="google",
+                zoom=15)
+# plot
+ggmap(map2) +
+  geom_sf(data=fulldat_lat_sf, aes(color=rec_dists, size=`Max Power (dB)`), inherit.aes = FALSE) + 
+  scale_color_viridis() + coord_sf() + theme_classic()
+
+```
+
+Ok, now let's try plotting the amplitudes vs. the distance to the recorder.
+
+```{r regressionPlot}
+
+# high freq and by lake
+ggplot() + 
+    geom_smooth(data=fulldat_sf, aes(x=rec_dists, y=`High Freq (Hz)`, group=LAKE), alpha=0.3) + 
+  geom_point(data=fulldat_sf, aes(x=rec_dists, y=`High Freq (Hz)`, color=rec_dists, group=LAKE)) + 
+  scale_color_viridis() + theme_classic() + facet_grid(LAKE~.)
+
+# max power by lake
+ggplot() + 
+  geom_smooth(data=fulldat_sf, aes(x=rec_dists, y=`Max Power (dB)`, group=LAKE), alpha=0.3) + 
+  geom_point(data=fulldat_sf, aes(x=rec_dists, y=`Max Power (dB)`, color=`High Freq (Hz)`, size=rec_dists, group=LAKE)) + 
+  scale_color_viridis() + theme_classic() + facet_grid(LAKE~.)
+
+# max peak power
+ggplot() + 
+    geom_smooth(data=fulldat_sf, aes(x=rec_dists, y=`Peak Power (dB)`, group=LAKE), alpha=0.3) + 
+  geom_point(data=fulldat_sf, aes(x=rec_dists, y=`Peak Power (dB)`, color=`High Freq (Hz)`, size=rec_dists, group=LAKE)) + 
+  scale_color_viridis() + theme_classic() + facet_grid(LAKE~.)
+
+```
+
