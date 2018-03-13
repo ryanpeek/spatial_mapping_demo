@@ -98,16 +98,47 @@ dat_sf <- st_as_sf(dat2,
 
 ```{r MapViewplot}
 
-mapview(dat_sf)
+mapview(dat_sf) 
 
 ```
 
 ```{r geom_sf}
+library(ggrepel)
 
 ggplot() + 
+  ggrepel::geom_text_repel(data=dat_sf, aes(x=Long, y=Lat, label=Site), color="gray40", size=3) +
   geom_sf(data=dat_sf, aes(fill=DO_sat), pch=21, size=4) +
-  scale_fill_viridis() + theme_minimal()
+  scale_fill_viridis() + theme_minimal() + coord_sf()
 
 ```
 
+ > **Challenge:**
+
+ > See if you can use the code above as the basis for a map that adds a ggmap background (`maptype="satellite"`), and filters to only data collected on March 8th. Fill by `Chlor`.
+
+
+```{r ggmap_sf, echo=F, eval=F}
+
+# add extra cols
+dat_sf <- dat_sf %>% 
+  mutate(mon= month(datetime), 
+         yday = yday(datetime))
+dat_sf_filt <- filter(dat_sf, mon==3)
+
+# ggmap
+map1 <- get_map(location=c(-121.922, 38.22), crop = F,
+                #color="bw",
+                maptype="satellite",
+                source="google",
+                zoom=15)
+# plot
+ggmap(map1) + 
+  ggrepel::geom_text_repel(data=dat_sf_filt, aes(x=Long, y=Lat, label=Site), color="white", size=3) +
+  geom_sf(data=dat_sf_filt, aes(fill=Chlor), inherit.aes = FALSE, pch=21, size=4) +
+  scale_fill_viridis() + theme_minimal(base_family = "Roboto Condensed") + coord_sf()
+
+ggsave(filename = "figs/suisun_aerial_chlor_2018_03_08.png", width=7, height=6, dpi=300)
+```
+
+![](../figs/suisun_aerial_chlor_2018_03_08.png)
 
